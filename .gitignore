@@ -10,5 +10,7 @@ wheels/
 .venv
 
 WESAD
-
 DataPaper
+data/
+.ipynb_checkpoints/
+*.ipynb_checkpoints
