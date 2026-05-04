@@ -68,7 +68,8 @@ def make_scorer(pipeline, covariate_cols: list[str]) -> callable:
         valid = ~np.isnan(obs)
         if valid.sum() == 0:
             return float("nan")
-        # One-sided: how far BELOW the Chronos-2 median forecast is the observed RMSSD?
-        return float(np.mean(np.maximum(0.0, (q50[valid] - obs[valid]) / iqr[valid])))
+        # Two-sided absolute deviation: handles both HRV suppression and
+        # atypical upward stress responses across subjects.
+        return float(np.mean(np.abs(q50[valid] - obs[valid]) / iqr[valid]))
 
     return scorer

@@ -25,8 +25,8 @@ def make_scorer(stats_window: int = 60) -> callable:
         obs = observed_df[TARGET].dropna().values
         if len(obs) == 0:
             return float("nan")
-        # One-sided: how far BELOW the recent mean is the observed RMSSD?
-        # Stress causes HRV to drop, so flag downward deviations.
-        return float(np.mean(np.maximum(0.0, (mu - obs) / sigma)))
+        # Two-sided absolute deviation: works for both subjects who show HRV
+        # suppression AND the ~1/3 of subjects who show atypical stress responses.
+        return float(np.mean(np.abs(mu - obs) / sigma))
 
     return scorer
