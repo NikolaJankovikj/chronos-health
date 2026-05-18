@@ -196,13 +196,13 @@ ARIMAX was implemented with a per-subject fit on the baseline context window. An
 
 The fix was to use the in-sample fitted values' mean and residual standard deviation (`sqrt(model.scale)`) as the baseline distribution parameters — effectively making ARIMAX behave like a statistically principled SMA that fits the noise structure more carefully. After this fix, ARIMAX achieved median AUROC=0.981 and notably performed best among the four methods on atypical subjects.
 
-**The information asymmetry:** ARIMAX receives the true future covariate values during evaluation (the sensor readings exist regardless of the model). Chronos-2 uses only past covariate history. This gives ARIMAX a legitimate information advantage that should be stated explicitly in the thesis. Despite this, ARIMAX does not statistically outperform Chronos-2 on the full subject set.
+**A note on the ARIMAX implementation:** The original design passed future covariate values (`exog_test`) to `get_forecast()`, giving ARIMAX access to sensor readings from inside the evaluation window — an information advantage Chronos-2 does not have. However, this approach was abandoned because SARIMAX long-range extrapolation is unstable over the 13-minute baseline-to-stress gap in WESAD (forecasts diverged, producing AUROC as low as 0.083 on S2). The final implementation replaces the forecast with the baseline context mean and MLE residual standard deviation — no future covariates are used. Both ARIMAX and Chronos-2 have equivalent information access in the current code.
 
 ### Chronos-2 (no covariates vs. with covariates)
 
 Both Chronos-2 variants achieve median AUROC=0.960. The covariate ablation (CV vs noCV) shows no meaningful difference (p=0.500, Cliff's δ=−0.20). This null result on the ablation is not a failure — it is scientifically correct given WESAD's sedentary conditions. The ablation confirms that the covariate pathway in Chronos-2 is not harmful (it doesn't hurt) but simply has no signal to work with in this dataset.
 
-**Chronos-2 vs SMA:** Chronos-2 achieves slightly lower median AUROC than SMA (0.960 vs 0.979). This is consistent with known foundation model behaviour on short, clean time series: the probabilistic outputs of Chronos-2 may be wider (higher uncertainty) than the empirical rolling distribution used by SMA, leading to slightly lower discrimination at the ceiling. Chronos-2's advantage is expected to emerge when the "expected" RMSSD is not simply the recent mean — i.e., when non-stationarities (like transitions between activity states) must be handled.
+**Chronos-2 vs SMA and ARIMAX:** Chronos-2 achieves slightly lower median AUROC than both SMA (0.960 vs 0.979) and ARIMAX (0.960 vs 0.981). For SMA, this likely reflects that Chronos-2's probabilistic IQR is wider than SMA's empirical rolling standard deviation — a wider uncertainty band means the normalised deviation score is smaller for the same absolute RMSSD difference, reducing discrimination at the ceiling. For ARIMAX, its MLE residual standard deviation (fitted over 300 seconds with autocorrelation accounted for) is tighter still, giving the sharpest normalisation of the three — hence its marginal lead on atypical subjects where the anomaly is a modest upward deviation. None of these differences are statistically significant at N=15. Chronos-2's advantage over both is expected to emerge in Phase 2, where non-stationarity (activity transitions) creates a scenario that neither SMA nor ARIMAX can handle with a fixed baseline mean.
 
 ---
 
@@ -244,7 +244,7 @@ Phase 2 (MMASH) provides exactly this scenario. The evaluation shifts from "dete
 | 6 | Band exceedance score | Natural for probabilistic forecasters | Stress/baseline scores indistinguishable (≈0.493 vs 0.492) |
 | 7 | One-sided deviation score | Stress causes RMSSD to drop | Fixed typical subjects; broke atypical subjects (AUROC < 0.5) |
 | 8 | Two-sided absolute deviation | Direction-agnostic; handles individual variability | All subjects valid; atypical subjects recover to 0.67–0.98 |
-| 9 | ARIMAX long-range forecast fix | `get_forecast()` unstable at 13+ min extrapolation | S2 ARIMAX recovered from 0.083 to 0.938 |
+| 9 | ARIMAX long-range forecast fix | `get_forecast()` unstable at 13+ min extrapolation; original design also passed future covariates (`exog_test`) — an information advantage not available to Chronos-2 | Replaced with baseline mean + MLE residual std; no future covariates used; S2 ARIMAX recovered from 0.083 to 0.938; both methods now have equivalent information access |
 
 ---
 

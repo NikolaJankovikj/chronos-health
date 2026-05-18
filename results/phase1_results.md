@@ -84,7 +84,7 @@ Two-sided absolute deviation (rather than one-sided) is used because ~1/3 of sub
 | Chronos2_noCV | `autogluon/chronos-2-small` (28M params) | None — zero-shot | No |
 | Chronos2_CV | `autogluon/chronos-2-small` (28M params) | None — zero-shot | Yes (past-only) |
 
-**Important asymmetry:** ARIMAX receives future covariate values during the forecast horizon (sensor readings are always available). Chronos-2 uses only past covariate history (realistic deployment mode). This gives ARIMAX a slight information advantage; it is noted here and should be acknowledged in the thesis.
+**Note on ARIMAX implementation:** The initial ARIMAX design called `get_forecast(steps=H, exog=exog_test)` where `exog_test` contained the actual covariate values from the evaluation window — giving it access to future sensor readings that Chronos-2 does not have. This would have been a genuine information asymmetry. However, long-range SARIMAX extrapolation proved unstable (forecasts diverge when the evaluation window is 13+ minutes from the context end, as in the WESAD baseline→stress gap), so the implementation was changed. ARIMAX now uses only the baseline mean and residual standard deviation from the fitted model (`mu = fittedvalues.mean()`, `sigma = sqrt(model.scale)`), with no access to future covariate values. Chronos-2 similarly uses only past covariates from the context window. Both methods have equivalent information access in the final implementation.
 
 **Evaluation protocol:** Leave-one-subject-out (LOSO). Chronos-2 is inherently zero-shot — no subject data is ever used for training. ARIMAX is fitted independently per subject on their own context window and evaluated on held-out windows from the same subject.
 
@@ -197,7 +197,7 @@ The Phase-1 finding establishes a clear motivation for Phase 2:
 2. **Single lab session per subject** — no longitudinal stability assessment.
 3. **WESAD stress is exclusively psychological (TSST)** — no physical stress condition, so Phase-1 cannot validate the physical-vs-psychological discrimination claim.
 4. **5 atypical subjects** — the reason stress RMSSD ≥ baseline RMSSD is unknown (possible pre-existing stress during baseline, ECG quality, individual autonomic reactivity profiles). These subjects are included in all analyses but flagged as a limitation.
-5. **Chronos-2 covariates are past-only** — ARIMAX receives future covariate values (an information advantage). This likely explains ARIMAX's marginal lead on atypical subjects.
+5. **ARIMAX's marginal lead on atypical subjects** — After the long-range extrapolation fix, ARIMAX no longer uses future covariate values. Its edge on atypical subjects (median AUROC 0.808 vs ~0.67 for Chronos-2) is more plausibly attributed to a better-calibrated noise estimate: SARIMAX fits the autocorrelation structure of the full 300-second baseline and produces a tighter MLE residual standard deviation (`sqrt(model.scale)`) than SMA's rolling empirical std over the last 60 seconds. For atypical subjects where the anomaly is an *upward* RMSSD deviation, a tighter sigma amplifies the normalised score and improves discrimination. This remains a post-hoc explanation at N=5 and should not be over-interpreted.
 
 ---
 
