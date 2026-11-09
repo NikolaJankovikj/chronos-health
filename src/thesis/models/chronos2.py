@@ -33,6 +33,39 @@ def _make_chronos_df(df: pd.DataFrame, item_id: str, offset_s: int = 0) -> pd.Da
     return out
 
 
+def forecast_batch(
+    pipeline,
+    contexts: list[pd.DataFrame],
+    futures: list[pd.DataFrame] | None,
+    horizon: int,
+    covariate_cols: list[str],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Forecast many windows in one call; return (q50, σ̂), each shaped (n, horizon).
+
+    contexts[i] holds the target and covariate history; futures[i] (when
+    covariates are used) holds the covariates for the `horizon` steps that
+    immediately follow it, passed as known-future values.
+    """
+    ids = [f"w{i:06d}" for i in range(len(contexts))]
+    ctx = pd.concat([_make_chronos_df(c[[TARGET] + covariate_cols], k) for c, k in zip(contexts, ids, strict=True)])
+    fut = None
+    if covariate_cols:
+        fut = pd.concat([_make_chronos_df(f[covariate_cols], k, offset_s=len(c))
+                         for c, f, k in zip(contexts, futures, ids, strict=True)])
+    pred = pipeline.predict_df(
+        ctx,
+        future_df=fut,
+        prediction_length=horizon,
+        quantile_levels=DEFAULT_QUANTILES,
+        id_column="item_id",
+        timestamp_column="timestamp",
+        target=TARGET,
+    ).sort_values(["item_id", "timestamp"])
+    q50 = pred[COL_Q50].to_numpy().reshape(len(ids), horizon)
+    sigma = (pred[COL_Q90] - pred[COL_Q10]).to_numpy().reshape(len(ids), horizon) / _Q10_Q90_PER_SIGMA + 1e-6
+    return q50, sigma
+
+
 def make_scorer(pipeline, covariate_cols: list[str]) -> callable:
     """Return a Chronos-2 scorer: mean |observed − q50| / σ̂, σ̂ = (q90 − q10) / 2.5631.
 
@@ -41,29 +74,12 @@ def make_scorer(pipeline, covariate_cols: list[str]) -> callable:
     immediately after the context, matching the ARIMAX scorer.
     """
     def scorer(context_df: pd.DataFrame, observed_df: pd.DataFrame) -> float:
-        ctx = _make_chronos_df(context_df[[TARGET] + covariate_cols], item_id="s0")
-        future = None
-        if covariate_cols:
-            future = _make_chronos_df(observed_df[covariate_cols], item_id="s0",
-                                      offset_s=len(context_df))
-
-        pred = pipeline.predict_df(
-            ctx,
-            future_df=future,
-            prediction_length=len(observed_df),
-            quantile_levels=DEFAULT_QUANTILES,
-            id_column="item_id",
-            timestamp_column="timestamp",
-            target=TARGET,
-        )
-
-        q50  = pred[COL_Q50].values
-        sigma = (pred[COL_Q90].values - pred[COL_Q10].values) / _Q10_Q90_PER_SIGMA + 1e-6
-        obs  = observed_df[TARGET].values.astype(float)
+        q50, sigma = forecast_batch(pipeline, [context_df], [observed_df], len(observed_df), covariate_cols)
+        obs = observed_df[TARGET].values.astype(float)
         valid = ~np.isnan(obs)
         if valid.sum() == 0:
             return float("nan")
         # Two-sided: ~1/3 of subjects show RMSSD rising, not falling, under stress.
-        return float(np.mean(np.abs(q50[valid] - obs[valid]) / sigma[valid]))
+        return float(np.mean(np.abs(q50[0][valid] - obs[valid]) / sigma[0][valid]))
 
     return scorer

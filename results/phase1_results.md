@@ -151,6 +151,8 @@ The defensible conclusion is that WESAD cannot test the thesis's covariate claim
 - Chronos-2's response to unfamiliar covariates is to become uncertain. In free-living data an exercise bout outside the context's range would therefore push scores down. That looks like "false-positive suppression", but it suppresses true positives just as much. Phase 2 must report sensitivity alongside the false-positive rate, and its context must contain activity variation (a longer context).
 - HR and EDA should not be covariates for an HRV-residual detector: they carry the stress signal themselves (§3.4 and §4.3).
 
+*Checked in Phase 2 (`results/phase2_results.md`):* with a 30-min free-living context, only 2–3% of covariate values fell outside the context's range, and covariates were neutral for Chronos-2. Both sensitivity and false alarms were reported as recommended.
+
 ---
 
 ## 5. Limitations

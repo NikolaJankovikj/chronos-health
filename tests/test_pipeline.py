@@ -56,15 +56,21 @@ def test_arimax_window_covariates_expose_hidden_shift():
 
 
 class _RecordingPipeline:
+    """Stands in for Chronos-2: records future_df, forecasts q10/q50/q90 = 0/1/2."""
+
     def __init__(self):
         self.future_df = "unset"
 
     def predict_df(self, df, future_df=None, prediction_length=None, **_):
         self.future_df = future_df
+        ids = df["item_id"].unique()
+        n = len(ids) * prediction_length
         return pd.DataFrame({
-            "0.1": np.zeros(prediction_length),
-            "0.5": np.ones(prediction_length),
-            "0.9": np.full(prediction_length, 2.0),
+            "item_id": np.repeat(ids, prediction_length),
+            "timestamp": np.tile(np.arange(prediction_length), len(ids)),
+            "0.1": np.zeros(n),
+            "0.5": np.ones(n),
+            "0.9": np.full(n, 2.0),
         })
 
 
@@ -119,3 +125,13 @@ def test_held_out_baseline_starts_after_guard():
     assert len(ctx) == h.CONTEXT_S
     assert held_out[0] - ctx.index[-1] == h.GUARD_S + 1
     assert held_out[-1] == 909
+
+
+def test_chronos_batch_keeps_window_order():
+    contexts = [pd.DataFrame({"rmssd": np.ones(5), "vm": np.full(5, float(k))}) for k in range(12)]
+    futures = [pd.DataFrame({"vm": np.full(3, float(k))}) for k in range(12)]
+    pipe = _RecordingPipeline()
+    q50, sigma = chronos2.forecast_batch(pipe, contexts, futures, 3, ["vm"])
+    assert q50.shape == sigma.shape == (12, 3)
+    per_item = pipe.future_df.groupby("item_id")["vm"].first().tolist()
+    assert per_item == [float(k) for k in range(12)]

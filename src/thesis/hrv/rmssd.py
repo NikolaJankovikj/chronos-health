@@ -46,11 +46,12 @@ def rmssd_series(
     peak_times_s: np.ndarray,
     n_seconds: int,
     window_s: int = 60,
+    min_diffs: int = 1,
 ) -> np.ndarray:
     """Rolling RMSSD (ms) at 1 Hz over a `window_s` trailing window.
 
-    Returns array of length n_seconds; NaN where the window holds no pair of
-    successive valid intervals.
+    Returns array of length n_seconds; NaN where the window holds fewer than
+    `min_diffs` successive differences between valid, adjacent intervals.
     Index i corresponds to the interval [i, i+1) seconds from recording start.
     """
     results = np.full(n_seconds, np.nan)
@@ -63,7 +64,7 @@ def rmssd_series(
         right = bisect.bisect_right(ts, t_end)
         diffs = np.diff(rr_ms[left:right])
         diffs = diffs[~np.isnan(diffs)]
-        if len(diffs) >= 1:
+        if len(diffs) >= min_diffs:
             results[i] = float(np.sqrt(np.mean(diffs ** 2)))
 
     return results

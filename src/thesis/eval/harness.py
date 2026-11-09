@@ -192,6 +192,15 @@ def verdict(cmp: dict[str, float], p_adj: float) -> str:
     return "inconclusive"
 
 
+def compare_family(table: pd.DataFrame, pairs: list[tuple[str, str]], family: str) -> pd.DataFrame:
+    """Paired comparisons of per-subject metric columns, Holm-corrected within the family."""
+    rows = [{"family": family, "a": a, "b": b, **compare_methods(table[a], table[b])} for a, b in pairs]
+    out = pd.DataFrame(rows)
+    out["p_holm"] = holm(out["p_value"].tolist())
+    out["verdict"] = [verdict(r, r["p_holm"]) for r in out.to_dict("records")]
+    return out
+
+
 def phase1_scorers(pipeline) -> dict[str, Scorer]:
     """Primary (univariate) scorers first, then the covariate variants."""
     from thesis.models import arimax, chronos2, sma

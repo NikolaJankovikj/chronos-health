@@ -50,20 +50,6 @@ def summarize(results: dict[str, pd.DataFrame]) -> pd.DataFrame:
     return pd.DataFrame(rows).T
 
 
-def compare_family(
-    auroc: pd.DataFrame, pairs: list[tuple[str, str]], family: str
-) -> pd.DataFrame:
-    """Paired comparisons with Holm correction inside the family."""
-    rows = [
-        {"family": family, "a": a, "b": b, **h.compare_methods(auroc[a], auroc[b])}
-        for a, b in pairs
-    ]
-    df = pd.DataFrame(rows)
-    df["p_holm"] = h.holm(df["p_value"].tolist())
-    df["verdict"] = [h.verdict(r, r["p_holm"]) for r in df.to_dict("records")]
-    return df
-
-
 def covariate_ood(subject_dfs: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """Per covariate: share of stress-period values outside the context's [min, max],
     and the stress-period mean shift in context-std units (median over subjects)."""
@@ -143,8 +129,8 @@ def main() -> None:
 
     auroc = pd.DataFrame({k: v["auroc"].astype(float) for k, v in results.items()})
     summary = summarize(results)
-    primary = compare_family(auroc, PRIMARY, "primary")
-    secondary = compare_family(auroc, SECONDARY, "secondary")
+    primary = h.compare_family(auroc, PRIMARY, "primary")
+    secondary = h.compare_family(auroc, SECONDARY, "secondary")
     tables = {
         "auroc": auroc,
         "summary": summary,

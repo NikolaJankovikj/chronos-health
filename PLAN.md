@@ -9,6 +9,8 @@ Two-phase evaluation:
 - **Phase 1 (WESAD)** — *Detection validation:* Chronos-2 with physiological covariates produces forecast residuals that detect psychologically-induced HRV anomalies in controlled lab data, outperforming ARIMAX and SMA baselines, zero-shot, leave-one-subject-out.
 - **Phase 2 (MMASH)** — *Contextual attribution:* In free-living data, Chronos-2 with activity + sleep + ingestion covariates suppresses false-positive anomalies during exercise/sleep/meals; the residual (unexplained HRV deviation) is interpreted as a *candidate* psychological-stress signal, validated circumstantially via correlation with self-reported daily stress and cortisol AUC.
 
+**Status (2026-11-09):** both phases are complete. Phase 1: stress is detectable (median AUROC ≈ 0.96), but Chronos-2 is not better than SMA or ARIMA. Phase 2: the covariate claim is not supported. See `results/phase1_results.md` and `results/phase2_results.md`.
+
 iOS / on-device deployment is a deferred Phase 3, out of scope for this plan.
 
 ## 2. Constraints and decisions locked in
@@ -17,7 +19,7 @@ iOS / on-device deployment is a deferred Phase 3, out of scope for this plan.
 - Primary model: `autogluon/chronos-2-small` (28M params); compare against full `amazon/chronos-2` (120M) only as a ceiling reference if compute allows.
 - Target series: **rolling RMSSD** at 1 Hz, computed over a 60 s sliding window of artifact-corrected RR intervals.
 - Covariates (Phase 1): HR (1 Hz mean), ACC magnitude, EDA, RESP rate, TEMP — all downsampled to 1 Hz. Covariate models get them as history **and** as concurrent (known-future) values for the scored window; the primary comparison is univariate (see `results/phase1_results.md`).
-- Covariates (Phase 2): Vector Magnitude / Steps / HR from Actigraph, Inclinometer state, **categorical activity code** from Activity.csv expanded to 1 Hz (covers exercise + eating + caffeine + alcohol + screen use), binary `is_sleeping` from sleep.csv.
+- Covariates (Phase 2): 60-s trailing Vector Magnitude and steps/min, inclinometer lying/standing fractions, `is_sleeping` from sleep.csv, and Activity.csv flags for exercise (codes 5–6), eating (7) and stimulants (10–12), all at 1 Hz. HR is **not** a covariate: it carries the stress response itself (Phase 1 finding).
 - Baselines: **SMA** (sanity floor, univariate), **ARIMAX** (with covariates, headline classical baseline). LSTM forecaster deferred.
 - Evaluation: leave-one-subject-out; AUROC/AUPRC of anomaly score vs. labels; paired Wilcoxon signed-rank for method comparisons; report effect sizes.
 - Anomaly score: fraction of observed values outside [q10, q90] forecast band, **and** standardized residual = (observed − median forecast) / forecast IQR. Report both.
@@ -106,18 +108,18 @@ Phase 1 is "done" when:
 
 If the model **fails** these criteria, that is also a publishable result (negative result on foundation models for this task), but the thesis framing changes — discuss before proceeding to Phase 2.
 
-## 6. Phase 2 — MMASH contextual attribution (sketch only)
+## 6. Phase 2 — MMASH contextual attribution (done)
 
-Detailed plan written after Phase 1 is validated. Sketch:
+Final protocol, results and revision log: `results/phase2_results.md`. Summary of tasks:
 
-- T2.1: Verify and document MMASH activity coding scheme (paper / dataset README).
-- T2.2: MMASH loader (RR.csv, Actigraph.csv, Activity.csv, sleep.csv).
-- T2.3: RR-interval artifact correction; RMSSD @ 1Hz.
-- T2.4: Covariate construction including categorical activity code, sleep flag, all from same 1Hz grid.
-- T2.5: Apply Phase-1 model wrappers (no retraining for Chronos-2; refit ARIMAX per subject).
-- T2.6: Primary evaluation — FP rate during exercise-coded windows: context-aware vs context-blind.
-- T2.7: Secondary evaluation — residual behavior during sleep, eating, caffeine periods.
-- T2.8: Tertiary / exploratory — correlation of mean residual with `Daily_stress` questionnaire (cross-subject) and with cortisol delta (within-subject, weak).
+- [x] T2.1: Activity codes confirmed from the PhysioNet documentation (`src/thesis/covariates/mmash.py`).
+- [x] T2.2: Loader, including the day-2 encoding bug in users 8 and 9 (`src/thesis/io/mmash.py`).
+- [x] T2.3: RR artifact filter, gap-aware successive differences, RMSSD @ 1 Hz with ≥ 20 differences per window.
+- [x] T2.4: Covariates on the same 1 Hz grid (`scripts/02_preprocess_mmash.py`).
+- [x] T2.5: Models: SMA / OLS + cov, persistence / persistence + cov, Chronos-2 / Chronos-2 + cov. ARIMAX was replaced by the persistence family, because per-window SARIMAX fits were infeasible on CPU.
+- [x] T2.6: Sensitivity measured by paired injection of an unexplained RMSSD drop (no stress labels exist). Activity false alarms measured as AUROC of active vs sedentary real windows.
+- [x] T2.7: Injection AUROC reported within sleep, active and sedentary windows.
+- [x] T2.8: Exploratory Spearman correlations with Daily Stress and cortisol change: none survive.
 
 ## 7. Out of scope
 
