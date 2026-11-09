@@ -134,3 +134,8 @@ Every model gets the same context. Both covariate models get the same concurrent
 4. The covariate claim cannot be tested on WESAD. Naive covariate use hurts Chronos-2, and its apparent benefit for ARIMAX comes from the covariates, not from HRV.
 
 **For Phase 2 (MMASH):** the covariate claim has to be tested where the reference context contains non-stress covariate variation (activity, sleep, meals). Sensitivity must be reported alongside the false-positive rate, because "suppressed" alarms may simply be inflated uncertainty. Stress markers (HR, EDA) should not be used as covariates for an HRV-residual detector.
+
+**What Phase 2 then found** (`results/phase2_results.md`): with a 30-min free-living context, covariates were neutral for Chronos-2 rather than harmful, which is consistent with the out-of-range diagnosis above. However, they did not help either:
+- Detection of an unexplained RMSSD drop was weak for every model (AUROC 0.61–0.66 at a 30% drop).
+- Activity produced almost no false alarms to suppress in the first place.
+- Chronos-2 again showed no practical advantage over the simple baselines.
