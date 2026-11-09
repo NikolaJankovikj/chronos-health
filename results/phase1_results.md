@@ -1,226 +1,181 @@
-# Phase 1 Results — WESAD: Psychological Stress Detection via HRV Anomaly Scoring
+# Phase 1 Results — WESAD: Stress Detection from HRV Forecast Residuals
 
-**Dataset:** WESAD (Wearable Stress and Affect Detection)  
-**Subjects:** 15 (S2–S17, excluding S1 and S12 — sensor malfunction)  
-**Date completed:** 2026-05-04
-
----
-
-## 1. Experimental Setup
-
-### 1.1 Dataset Overview
-
-WESAD is a controlled lab study. Each subject wore a chest device (RespiBAN, 700 Hz) and a wrist device (Empatica E4). The session included four conditions:
-
-| Condition | Label | Mean duration |
-|---|---|---|
-| Baseline (sitting, resting) | 1 | ~19 min |
-| Stress (TSST — public speaking + mental arithmetic) | 2 | ~10 min |
-| Amusement (funny video clips) | 3 | ~6 min |
-| Meditation | 4 | ~13 min (split) |
-
-Label 0 = transient (excluded from evaluation).
-
-The protocol order is always: Baseline → Stress → Meditation 1 → Amusement → Meditation 2, with ~13-minute unlabelled transition gaps between conditions.
-
-### 1.2 Target Signal: RMSSD
-
-Rolling RMSSD (root mean square of successive RR-interval differences) was computed at 1 Hz using a 60-second sliding window over Malik-filtered RR intervals derived from NeuroKit2 R-peak detection on the chest ECG (700 Hz).
-
-- RMSSD is a parasympathetic HRV metric. It typically **decreases** under psychological stress due to autonomic nervous system activation.
-- Of the 15 subjects, **10 show the expected pattern** (baseline RMSSD > stress RMSSD); **5 subjects show an atypical pattern** (stress RMSSD ≥ baseline RMSSD). This is consistent with the published WESAD results and reflects genuine inter-individual variability in HRV stress response.
-
-### 1.3 Covariate Signals
-
-All covariates computed at 1 Hz from the chest RespiBAN:
-
-| Covariate | Source | Processing |
-|---|---|---|
-| `hr_bpm` | RR intervals | Mean HR per second |
-| `acc_mag` | 3-axis accelerometer | L2 norm, mean-pooled |
-| `eda` | Electrodermal activity | Mean-pooled |
-| `resp_rate` | Respiration belt | Bandpass (0.1–0.5 Hz) + peak detection @ 10 Hz, 60s rolling |
-| `temp` | Skin temperature | Mean-pooled |
-
-### 1.4 Evaluation Design — Personal Baseline Context
-
-**Key design decision:** a naive rolling-window evaluation was initially tried but produced AUROC ≈ 0.47 (near chance) for all methods. Investigation revealed why: the WESAD protocol has a 13-minute unlabelled gap between the baseline and stress conditions. By the time any stress window is evaluated, a rolling context window (≤5 min) falls entirely within the stress period — the model's recent history already includes depressed RMSSD, so no anomaly is detected.
-
-The correct evaluation for WESAD uses a **personal-baseline context**:
-
-- **Context:** last 300 seconds (5 min) drawn from the first 2/3 of each subject's baseline period (pure label=1, no data leakage).
-- **Evaluation windows:** drawn from (a) held-out late baseline (last 1/3 of baseline) and (b) the full stress period. Each window is 30 seconds, stride 30 seconds (non-overlapping).
-- **Question answered:** *"Given 5 minutes of this person's resting baseline, is this 30-second window anomalous?"*
-
-This design is clinically meaningful: a deployed wearable system would use an initial rest period to establish the user's personal HRV baseline before monitoring for deviations.
-
-**Window counts per subject:** 32–37 total windows (12–13 baseline + 20–21 stress per subject).
-
-### 1.5 Anomaly Score
-
-All four methods output a scalar anomaly score per 30-second window using a **two-sided absolute normalised deviation** from the context baseline distribution:
-
-```
-score = mean( |expected - observed| / scale )
-```
-
-Where `expected` and `scale` are model-specific:
-
-| Method | Expected | Scale |
-|---|---|---|
-| SMA | Rolling mean of context RMSSD (last 60 s) | Rolling std |
-| ARIMAX | Mean of SARIMAX(2,0,2) fitted values over context | Residual std √scale |
-| Chronos2_noCV | Median forecast (q0.5) — no covariates | IQR (q0.9 − q0.1) |
-| Chronos2_CV | Median forecast (q0.5) — with all 5 covariates | IQR (q0.9 − q0.1) |
-
-Two-sided absolute deviation (rather than one-sided) is used because ~1/3 of subjects show atypical upward stress responses; one-sided scoring would produce inverted (< 0.5) AUROC for those subjects.
-
-### 1.6 Models
-
-| Model | Type | Training required | Covariates |
-|---|---|---|---|
-| SMA | Simple Moving Average | None (analytic) | No |
-| ARIMAX | SARIMAX(2,0,2) | Per-subject fit on context window | Yes |
-| Chronos2_noCV | `autogluon/chronos-2-small` (28M params) | None — zero-shot | No |
-| Chronos2_CV | `autogluon/chronos-2-small` (28M params) | None — zero-shot | Yes (past-only) |
-
-**Note on ARIMAX implementation:** The initial ARIMAX design called `get_forecast(steps=H, exog=exog_test)` where `exog_test` contained the actual covariate values from the evaluation window — giving it access to future sensor readings that Chronos-2 does not have. This would have been a genuine information asymmetry. However, long-range SARIMAX extrapolation proved unstable (forecasts diverge when the evaluation window is 13+ minutes from the context end, as in the WESAD baseline→stress gap), so the implementation was changed. ARIMAX now uses only the baseline mean and residual standard deviation from the fitted model (`mu = fittedvalues.mean()`, `sigma = sqrt(model.scale)`), with no access to future covariate values. Chronos-2 similarly uses only past covariates from the context window. Both methods have equivalent information access in the final implementation.
-
-**Evaluation protocol:** Leave-one-subject-out (LOSO). Chronos-2 is inherently zero-shot — no subject data is ever used for training. ARIMAX is fitted independently per subject on their own context window and evaluated on held-out windows from the same subject.
+**Dataset:** WESAD, 15 subjects (S2–S17; S1 and S12 were excluded by the dataset authors for sensor malfunction)
+**Final run:** 2026-11-09 — supersedes every earlier Phase-1 number (see §6)
+**Reproduce** (needs the raw WESAD release in `WESAD/`, gitignored): `uv run python scripts/01_preprocess_wesad.py && uv run python scripts/03_run_phase1.py && uv run python scripts/04_plot_phase1.py`
+**Tables:** `results/phase1_{per_subject,summary,comparisons,covariate_ood,hrv_dependence}.csv` · **Figures:** `results/figures/`
 
 ---
 
-## 2. Results
+## 0. Answer in one paragraph
 
-### 2.1 Overall AUROC and AUPRC (all 15 subjects)
+Given five minutes of a person's resting baseline, all three univariate detectors (SMA, ARIMA, zero-shot Chronos-2) flag TSST stress windows with a median per-subject AUROC of about 0.96. **Chronos-2 is not better than either baseline.** Against SMA the 95% CI of the paired difference rules out any Chronos-2 advantage larger than +0.010 AUROC. Against ARIMA it is worse on every non-tied subject (p_Holm = 0.031), but by only 0.004 AUROC, which is negligible. **Adding covariates makes Chronos-2 clearly worse** (−0.235 AUROC, 95% CI −0.363 to −0.130, p_Holm < 0.001). During stress the covariates sit far outside anything the rest context shows, and Chronos-2 reacts by widening its forecast interval. ARIMAX with covariates scores a median AUROC of 1.000, but a control shows this comes entirely from the covariates rather than from HRV. On WESAD the covariate question cannot be answered: the seated rest context has no non-stress covariate variation to learn from.
 
-| Method | Median AUROC | IQR | Median AUPRC |
-|---|---|---|---|
-| **SMA** | **0.979** | [0.833, 1.000] | **0.988** |
-| **ARIMAX** | **0.981** | [0.862, 1.000] | **0.989** |
-| Chronos2_noCV | 0.960 | [0.829, 1.000] | 0.980 |
-| Chronos2_CV | 0.960 | [0.833, 1.000] | 0.980 |
+---
 
-### 2.2 Per-Subject AUROC
+## 1. Protocol (fixed before the final run)
 
-| Subject | SMA | ARIMAX | Chronos2_noCV | Chronos2_CV |
-|---|---|---|---|---|
-| S2 | 0.979 | 0.938 | **1.000** | **1.000** |
-| S3 | 0.893 | **0.984** | 0.921 | 0.921 |
-| S4 | **1.000** | **1.000** | **1.000** | **1.000** |
-| S5 | 0.916 | **1.000** | 0.857 | 0.872 |
-| S6 * | 0.707 | 0.619 | 0.593 | 0.593 |
-| S7 * | **0.982** | 0.971 | 0.960 | 0.960 |
-| S8 | 0.883 | 0.917 | 0.958 | **0.958** |
-| S9 * | 0.322 | 0.637 | **0.667** | 0.659 |
-| S10 * | 0.513 | **0.808** | 0.487 | 0.474 |
-| S11 | **1.000** | **1.000** | **1.000** | **1.000** |
-| S13 | 0.783 | 0.776 | **0.801** | 0.794 |
-| S14 | **1.000** | **1.000** | **1.000** | **1.000** |
-| S15 * | 0.981 | 0.981 | **0.985** | **0.985** |
-| S16 | **1.000** | **1.000** | **1.000** | **1.000** |
-| S17 | **1.000** | **1.000** | **1.000** | **1.000** |
-
-\* Atypical subjects (stress RMSSD ≥ baseline RMSSD). Bold = highest AUROC in row.
-
-### 2.3 Results Stratified by Subject Type
-
-**Typical subjects (n=10, baseline RMSSD > stress RMSSD):**
-
-| Method | Median AUROC | IQR |
+| Element | Choice | Why |
 |---|---|---|
-| SMA | 0.990 | [0.899, 1.000] |
-| ARIMAX | 1.000 | [0.949, 1.000] |
-| Chronos2_noCV | 1.000 | [0.930, 1.000] |
-| Chronos2_CV | 1.000 | [0.930, 1.000] |
+| Target | Rolling RMSSD, 60 s window, 1 Hz, from Malik-filtered chest-ECG RR intervals (rejected intervals are NaN, never differenced across) | Parasympathetic marker, stable on 60 s |
+| Reference context | Last 300 s of the first 2/3 of the subject's baseline (label 1) | Personal resting reference; the rest of the baseline is held out |
+| Guard | 60 s between the context end and the first held-out baseline window | Equals the RMSSD window, so no beat is shared with the context |
+| Windows | 30 s, non-overlapping, tiled inside each time-contiguous label segment | One label per window, no window spans a gap |
+| Primary task | Stress (label 2) vs held-out baseline (label 1) | The thesis question |
+| Control task | Stress vs amusement + meditation (labels 3, 4) | Non-stress windows that, like stress, lie far in time from the context |
+| Score | Mean over the window of \|observed − point forecast\| / σ̂ (two-sided) | Same formula for every model; two-sided because 5 subjects' RMSSD rises under stress |
+| σ̂ | SMA: context std · ARIMA(X): forecast s.e. · Chronos-2: (q90 − q10)/2.563 | Puts every score in σ units |
+| Metric | Per-subject AUROC (AUPRC also reported) | Threshold-free, per person |
+| Inference | Paired Wilcoxon signed-rank on per-subject AUROC; Holm correction within each family; mean paired difference with 95% subject-bootstrap CI (10,000 resamples); matched-pairs rank-biserial r | n = 15 subjects is the unit of inference, not windows |
+| Decision rule | Better = p_Holm < 0.05. A 95% CI inside ±0.05 AUROC = equivalent; a one-sided bound inside the margin = "not meaningfully better" | 0.05 is the conventional minimal important AUROC difference |
 
-**Atypical subjects (n=5, stress RMSSD ≥ baseline RMSSD):**
+**Models.** All receive the identical context.
 
-| Method | Median AUROC | IQR |
+| Family | Model | Inputs |
 |---|---|---|
-| SMA | 0.707 | [0.513, 0.981] |
-| **ARIMAX** | **0.808** | [0.637, 0.971] |
-| Chronos2_noCV | 0.667 | [0.593, 0.960] |
-| Chronos2_CV | 0.659 | [0.593, 0.960] |
+| Primary (univariate) | SMA: mean and std of the context | Context RMSSD |
+| | ARIMA(2,0,2), fitted per subject on the context, stationarity enforced | Context RMSSD |
+| | Chronos-2-small (`autogluon/chronos-2-small`, 28M), zero-shot, CPU | Context RMSSD |
+| Secondary (covariates) | ARIMAX(2,0,2) | + HR, ACC magnitude, EDA, respiration rate, skin temp: history **and** the scored window's concurrent values |
+| | Chronos-2-small | Same covariates (`df` history + `future_df`) |
 
-### 2.4 Statistical Comparisons (Paired Wilcoxon Signed-Rank, n=15)
+Forecasting models score each window as if it immediately followed the context. That is the right question for a personal-reference design: "what would this person's resting RMSSD look like?" Stress begins 17–44 min (median 37) after the context ends. Seven subjects ran the stress-first protocol order (S2, S3, S6, S9, S11, S14, S16) and eight ran amusement-first (S4, S5, S7, S8, S10, S13, S15, S17).
 
-| Comparison | Δ Median AUROC | p-value | Cliff's δ |
+**Windows per subject:** 10–11 held-out baseline, 20–24 stress, 36–38 amusement + meditation.
+
+---
+
+## 2. Data checks
+
+- **Artifact rate** (share of RR intervals rejected): 0.0–3.0% per subject (S2 3.0%, S3 2.3%, S7 1.5%, S17 1.1%, all others < 1%). Every subject is under the 5% threshold of task T1.6.
+- **Central biomarker assumption (T1.7):** mean stress RMSSD is below mean baseline RMSSD in 10 of 15 subjects. The 5 atypical subjects are S6, S7, S9, S10 and S15. All subjects are retained.
+
+---
+
+## 3. Results
+
+### 3.1 Summary (median over 15 subjects)
+
+| Method | AUROC, stress vs baseline [IQR] | AUPRC | AUROC, stress vs amusement + meditation |
 |---|---|---|---|
-| Chronos2_CV vs SMA | −0.019 | 0.878 | +0.13 |
-| Chronos2_CV vs ARIMAX | −0.021 | 0.508 | 0.00 |
-| Chronos2_CV vs Chronos2_noCV | 0.000 | 0.500 | −0.20 |
-| Chronos2_noCV vs SMA | −0.019 | 0.799 | +0.13 |
+| SMA | 0.955 [0.859, 1.000] | 0.981 | 0.785 |
+| ARIMA | 0.968 [0.883, 1.000] | 0.987 | 0.704 |
+| **Chronos-2** | **0.959** [0.878, 1.000] | 0.983 | 0.688 |
+| ARIMAX + covariates | 1.000 [0.947, 1.000] | 1.000 | 0.968 |
+| Chronos-2 + covariates | 0.660 [0.357, 0.895] | 0.811 | 0.560 |
 
-No comparison reaches statistical significance. All p-values are well above α = 0.05.
+All 15 subjects produced valid scores for every method.
 
-### 2.5 Phase-1 Success Criteria
+### 3.2 Per-subject AUROC (stress vs held-out baseline)
+
+| Subject | SMA | ARIMA | Chronos-2 | ARIMAX + cov | Chronos-2 + cov |
+|---|---|---|---|---|---|
+| S2 | 0.955 | 1.000 | 1.000 | 0.640 | 0.660 |
+| S3 | 0.952 | 0.933 | 0.929 | 0.957 | 0.524 |
+| S4 | 1.000 | 1.000 | 1.000 | 1.000 | 0.876 |
+| S5 | 1.000 | 0.944 | 0.926 | 1.000 | 0.835 |
+| S6 * | 0.645 | 0.619 | 0.606 | 0.727 | 0.364 |
+| S7 * | 0.887 | 0.926 | 0.922 | 1.000 | 0.649 |
+| S8 | 0.923 | 0.968 | 0.959 | 0.936 | 0.877 |
+| S9 * | 0.602 | 0.602 | 0.597 | 1.000 | 0.351 |
+| S10 * | 0.682 | 0.367 | 0.367 | 1.000 | 0.167 |
+| S11 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+| S13 | 0.831 | 0.839 | 0.835 | 0.864 | 0.302 |
+| S14 | 1.000 | 1.000 | 1.000 | 1.000 | 0.967 |
+| S15 * | 0.977 | 0.982 | 0.982 | 0.995 | 0.914 |
+| S16 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+| S17 | 1.000 | 1.000 | 1.000 | 1.000 | 0.117 |
+
+\* Atypical subject (stress RMSSD ≥ baseline RMSSD). Medians for typical / atypical subjects: SMA 1.000 / 0.682, ARIMA 1.000 / 0.619, Chronos-2 1.000 / 0.606, ARIMAX + cov 1.000 / 1.000, Chronos-2 + cov 0.856 / 0.364 (fig3).
+
+### 3.3 Planned comparisons (A − B in per-subject AUROC; fig4)
+
+| Family | A − B | Mean Δ [95% CI] | p (Holm) | r | Non-tied n | Verdict |
+|---|---|---|---|---|---|---|
+| Primary | Chronos-2 − SMA | −0.022 [−0.070, +0.010] | 0.695 | −0.16 | 10 | Chronos-2 not meaningfully better |
+| Primary | Chronos-2 − ARIMA | −0.004 [−0.007, −0.001] | 0.031 | −1.00 | 7 | ARIMA better, negligible |
+| Secondary | Chronos-2 + cov − Chronos-2 | −0.235 [−0.363, −0.130] | < 0.001 | −1.00 | 13 | Covariates hurt |
+| Secondary | ARIMAX + cov − ARIMA | +0.063 [−0.037, +0.177] | 0.131 | +0.56 | 10 | ARIMA not meaningfully better (see §4.3: the gain is not HRV) |
+
+"Non-tied n" counts the subjects with a non-zero difference. Wilcoxon drops ties, which here are mostly subjects where both methods score 1.000.
+
+### 3.4 Covariate controls
+
+**How far the covariates move during stress, relative to the rest context** (median over subjects):
+
+| Covariate | Stress values outside the context's [min, max] | Mean shift, in context SDs |
+|---|---|---|
+| EDA | 100% | 42.3 |
+| Skin temperature | 100% | 6.7 |
+| Respiration rate | 46% | 1.4 |
+| Heart rate | 32% | 3.0 |
+| ACC magnitude | 13% | 4.6 |
+
+**Does the detector depend on HRV?** Each window's observed RMSSD is replaced by the context mean and the AUROC is recomputed. A detector that still separates stress is using only the covariates.
+
+| Model | Median AUROC, RMSSD held flat |
+|---|---|
+| ARIMAX + covariates | 1.000 (unchanged: the detection comes entirely from the covariates) |
+| Chronos-2 + covariates | 0.065 (inverted: the covariates alone push stress-window scores *below* baseline windows) |
+
+### 3.5 Success criteria (PLAN.md §5.5)
 
 | Criterion | Result |
 |---|---|
-| Chronos2_CV AUROC > 0.70 (median) | ✅ PASS (0.960) |
-| Chronos2_CV > SMA (median) | ❌ FAIL (0.960 < 0.979) |
-| Chronos2_CV > ARIMAX (median) | ❌ FAIL (0.960 < 0.981) |
-| Covariates improve performance (CV > noCV) | ❌ FAIL (no difference) |
+| 1. Chronos-2 median AUROC > 0.70 | **PASS** (0.959) |
+| 2. Chronos-2 beats SMA | **FAIL**: not meaningfully better (upper CI +0.010) |
+| 3. Chronos-2 beats ARIMA | **FAIL**: ARIMA marginally better |
+| 4. Covariates help Chronos-2 | **FAIL**: covariates significantly hurt |
+
+PLAN.md §5.5 also allowed "or effect size > small" as a pass. That lenient reading gives the same outcome, because every effect points against Chronos-2 (r = −0.16, −1.00, −1.00).
 
 ---
 
-## 3. Interpretation
+## 4. Interpretation
 
-### 3.1 Main finding
+### 4.1 Univariate: the foundation model adds nothing here
+With a fixed resting reference, each univariate model's prediction for a window is essentially an estimate of that person's resting RMSSD level and spread. Five minutes of rest pins that down well for all three, so they end up equivalent in practice: a 28M-parameter zero-shot model matches the context mean and std. For the 10 typical subjects the stress drop is large and every method reaches a median of 1.000. The 5 atypical subjects set the ceiling for all methods equally (medians 0.61–0.68).
 
-All four methods achieve high AUROC (~0.96–0.98 median) when evaluated against each subject's personal resting baseline. No method is statistically significantly better than any other (all p > 0.05, N = 15). The simplest baseline (SMA) performs on par with the 28M-parameter foundation model.
+### 4.2 The detector is not stress-specific
+Against amusement and meditation, which are also far in time from the context, the univariate medians fall to 0.69–0.79. The two-sided score flags any departure from rest. Stress departs further than amusement or meditation, so the score is better than chance, but it is a "deviation from personal rest" detector, not a stress detector. Because the control windows are as far from the context as the stress windows are, they also show that the primary AUROC is not just an artefact of time elapsed since the context.
 
-This is a **ceiling effect**, not a sign that the methods are equally powerful in general. It reflects three compounding factors:
+### 4.3 Covariates cannot be evaluated on WESAD
+A covariate model can only "explain" an RMSSD change if its context shows how RMSSD moves with that covariate. In WESAD the context is five minutes of seated rest, so the covariates barely vary, and during the TSST every covariate moves because of the stressor itself (EDA, HR, temperature) or the speaking task (respiration, movement), all far outside the context's range (§3.4). The two models fail in opposite ways:
 
-1. **Strong personal-baseline signal.** For the 10 typical subjects, mean baseline RMSSD (~53 ms) is far above mean stress RMSSD (~28 ms) — a separation of nearly 4 standard deviations. Even a single-number comparison (SMA) resolves this trivially.
+- **Chronos-2** responds to covariates it has not seen by widening its predictive interval. That shrinks the standardized residual exactly in the stress windows (flat-RMSSD AUROC 0.065), so detection gets worse.
+- **ARIMAX** extrapolates a near-unidentifiable linear fit (covariates that are nearly constant in the context) and produces forecasts unrelated to RMSSD. Its detection survives with RMSSD held flat, so it is acting as an accidental multimodal stress detector driven by EDA and HR. That also explains its high stress-vs-non-stress AUROC (0.968). It is not evidence that covariates help HRV anomaly detection.
 
-2. **Atypical subjects dominate variance.** The IQR is wide ([0.83, 1.00]) because 5 subjects show an inverted stress response. None of the four methods resolve these subjects well; ARIMAX has a slight edge on them (median 0.808 vs ~0.67 for others), likely because the fitted noise model captures covariate structure even when raw RMSSD direction is reversed.
+The defensible conclusion is that WESAD cannot test the thesis's covariate claim, and that naive covariate use is harmful (Chronos-2) or misleading (ARIMAX). Testing the claim requires data whose reference context contains non-stress covariate variation, which is the purpose of Phase 2.
 
-3. **WESAD has no physical activity variation.** All conditions are sedentary. Activity covariates (ACC, RESP rate) carry essentially no information for discriminating stress from baseline. This explains why Chronos2_CV = Chronos2_noCV — the key covariate advantage of Chronos-2 over its predecessors simply has no signal to work with here.
-
-### 3.2 Why naive rolling-window evaluation fails on WESAD
-
-The ~13-minute gap between the baseline and stress conditions, combined with a rolling context window, means that by the time stress windows are evaluated the model's entire context is within the stress period. The "recent normal" is already depressed RMSSD. The model predicts low RMSSD, observes low RMSSD, and generates no anomaly signal. This produces AUROC ≈ 0.47 — indistinguishable from random. The personal-baseline context design eliminates this artefact and is the appropriate evaluation for this dataset.
-
-### 3.3 Implication for thesis framing
-
-The Phase-1 finding establishes a clear motivation for Phase 2:
-
-> *In a controlled lab setting with a known clean baseline, any method from a 3-line SMA to a 28M-parameter foundation model can detect psychological stress from HRV with high accuracy. The challenge that distinguishes Chronos-2's covariate capability from simpler methods is not lab-based psychological stress detection — it is the free-living scenario where physical activity continuously confounds HRV interpretation. Phase 2 (MMASH) tests whether context-aware foundation models suppress false anomaly flags during exercise, sleep, and eating, while preserving sensitivity to unexplained HRV deviations.*
+### 4.4 What this means for Phase 2
+- Chronos-2's response to unfamiliar covariates is to become uncertain. In free-living data an exercise bout outside the context's range would therefore push scores down. That looks like "false-positive suppression", but it suppresses true positives just as much. Phase 2 must report sensitivity alongside the false-positive rate, and its context must contain activity variation (a longer context).
+- HR and EDA should not be covariates for an HRV-residual detector: they carry the stress signal themselves (§3.4 and §4.3).
 
 ---
 
-## 4. Limitations
+## 5. Limitations
 
-1. **N = 15 subjects** — underpowered for detecting small effect sizes between methods. With N=15 and paired tests, the minimum detectable Cliff's δ at power=0.8 is approximately 0.5.
-2. **Single lab session per subject** — no longitudinal stability assessment.
-3. **WESAD stress is exclusively psychological (TSST)** — no physical stress condition, so Phase-1 cannot validate the physical-vs-psychological discrimination claim.
-4. **5 atypical subjects** — the reason stress RMSSD ≥ baseline RMSSD is unknown (possible pre-existing stress during baseline, ECG quality, individual autonomic reactivity profiles). These subjects are included in all analyses but flagged as a limitation.
-5. **ARIMAX's marginal lead on atypical subjects** — After the long-range extrapolation fix, ARIMAX no longer uses future covariate values. Its edge on atypical subjects (median AUROC 0.808 vs ~0.67 for Chronos-2) is more plausibly attributed to a better-calibrated noise estimate: SARIMAX fits the autocorrelation structure of the full 300-second baseline and produces a tighter MLE residual standard deviation (`sqrt(model.scale)`) than SMA's rolling empirical std over the last 60 seconds. For atypical subjects where the anomaly is an *upward* RMSSD deviation, a tighter sigma amplifies the normalised score and improves discrimination. This remains a post-hoc explanation at N=5 and should not be over-interpreted.
+1. **n = 15.** Ceiling effects leave 5–8 tied subjects per primary comparison, which limits power. The CIs bound the possible effects regardless.
+2. **Windows within a subject are dependent** (overlapping 60-s RMSSD). Inference is therefore done at the subject level only.
+3. **A 300-s reference context** (from PLAN.md) was not tuned. Longer contexts were not tested.
+4. **A posture change during the TSST** (standing) would lower RMSSD independently of psychological stress. ACC magnitude cannot capture posture (gravity has the same norm in every orientation). This was not verified.
+5. **Only `chronos-2-small` was run.** The 120M model was not evaluated.
+6. **The atypical response in 5 subjects is unexplained.**
 
 ---
 
-## 5. Artefacts and Decisions Log
+## 6. Changes from earlier Phase-1 write-ups
 
-| Issue | Resolution |
+Earlier versions of this document reported SMA 0.979, ARIMAX 0.981, Chronos-2 0.960 with and without covariates, and "no significant differences". Those numbers came from code with the following defects, all fixed (`tests/test_pipeline.py` covers each):
+
+| Defect | Effect on earlier conclusions |
 |---|---|
-| First pass used rolling context → AUROC ≈ 0.47 (near chance) | Replaced with personal-baseline context |
-| One-sided anomaly score → AUROC < 0.5 for atypical subjects | Switched to two-sided absolute deviation |
-| ARIMAX long-range `get_forecast()` produced unstable extrapolations (e.g., S2 ARIMAX = 0.083) | Replaced with mean/std of fitted values over context window |
-| ARIMAX `conf_int()` returned `numpy.ndarray` not `DataFrame` in installed statsmodels version | Fixed with `np.asarray()` indexing |
-| 5 subjects show stress RMSSD > baseline RMSSD (S6, S7, S9, S10, S15) | Expected inter-individual variability; documented in results, all subjects retained |
-| RMSSD warmup NaN (first 60 s of session) | Forward-filled covariates; RMSSD NaN propagates naturally to context quality check |
-
----
-
-## 6. Files
-
-| File | Description |
-|---|---|
-| `data/wesad_processed/S*.parquet` | Per-subject 1 Hz DataFrame (rmssd, hr_bpm, acc_mag, eda, resp_rate, temp, label) |
-| `data/phase1_results.csv` | Per-subject per-method AUROC, AUPRC, n_windows |
-| `scripts/01_preprocess_wesad.py` | Preprocessing pipeline (T1.4–T1.8) |
-| `scripts/03_run_phase1.py` | LOSO evaluation (T1.9–T1.13) |
-| `src/thesis/eval/harness.py` | Personal-baseline context evaluation harness |
-| `src/thesis/models/{sma,arimax,chronos2}.py` | Scorer implementations |
+| Covariates never reached the scored window (Chronos-2 got them as history only; the ARIMAX score ignored them) | "Covariates make no difference" was true by construction |
+| RMSSD differenced across rejected beats | Shifted stress RMSSD in some subjects (S7: 72 → 64 ms), moving several AUROCs |
+| ARIMAX fit cache keyed on `id()` could reuse another subject's fit | Possible cross-subject contamination |
+| Respiration band-pass upper cutoff 2.45 Hz instead of 0.5 Hz | Negligible on WESAD (≈0.3 breaths/min) |
+| "Cliff's δ" was a sign statistic; no multiplicity correction; no CIs | Effect sizes mislabelled; "no difference" claimed from non-significance |
+| No guard between context and held-out baseline | First held-out windows shared beats with the context |
+| SMA used the last 60 s of context while the other models used 300 s | Unequal information |
+| Windows could straddle label gaps | Mixed-condition windows possible |
+| Protocol order assumed fixed ("Baseline → Stress → …") | Wrong for 8 of 15 subjects (amusement-first) |

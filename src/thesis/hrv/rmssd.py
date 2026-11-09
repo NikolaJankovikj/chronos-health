@@ -6,11 +6,29 @@ import numpy as np
 from scipy.ndimage import median_filter
 
 
+def filter_rr(rr_ms: np.ndarray) -> np.ndarray:
+    """Malik-style artifact filter; rejected intervals become NaN.
+
+    NaN (rather than deletion) keeps positions, so downstream successive
+    differences are never taken across a rejected beat.
+    """
+    out = rr_ms.astype(np.float64)
+    out[(out < 300.0) | (out > 2000.0)] = np.nan  # outside 30–200 bpm
+
+    in_range = ~np.isnan(out)
+    if in_range.sum() >= 5:
+        vals = out[in_range]
+        local_med = median_filter(vals, size=5, mode="nearest")
+        vals[np.abs(vals - local_med) / local_med >= 0.20] = np.nan
+        out[in_range] = vals
+    return out
+
+
 def extract_rr(ecg: np.ndarray, sampling_rate: int = 700) -> tuple[np.ndarray, np.ndarray]:
-    """Detect R-peaks, apply Malik artifact filter, return (rr_ms, peak_times_s).
+    """Detect R-peaks and filter artifacts; return (rr_ms, peak_times_s).
 
     peak_times_s[i] is the time (seconds from recording start) of the later beat
-    in pair i; rr_ms[i] = peak_times_s[i] - peak_times_s[i-1] (in milliseconds).
+    in pair i. rr_ms[i] is NaN where the interval was rejected as an artifact.
     """
     import neurokit2 as nk
 
@@ -20,20 +38,7 @@ def extract_rr(ecg: np.ndarray, sampling_rate: int = 700) -> tuple[np.ndarray, n
 
     rr_ms = np.diff(peaks).astype(np.float64) / sampling_rate * 1000.0
     peak_times_s = peaks[1:].astype(np.float64) / sampling_rate
-
-    # Malik filter — step 1: physiological range
-    mask = (rr_ms >= 300.0) & (rr_ms <= 2000.0)
-    rr_ms = rr_ms[mask]
-    peak_times_s = peak_times_s[mask]
-
-    # Malik filter — step 2: reject intervals deviating >20% from local 5-beat median
-    if len(rr_ms) >= 5:
-        local_med = median_filter(rr_ms, size=5, mode="nearest")
-        mask2 = np.abs(rr_ms - local_med) / local_med < 0.20
-        rr_ms = rr_ms[mask2]
-        peak_times_s = peak_times_s[mask2]
-
-    return rr_ms, peak_times_s
+    return filter_rr(rr_ms), peak_times_s
 
 
 def rmssd_series(
@@ -42,9 +47,10 @@ def rmssd_series(
     n_seconds: int,
     window_s: int = 60,
 ) -> np.ndarray:
-    """Rolling RMSSD (ms) at 1 Hz using an O(n) sliding-window approach.
+    """Rolling RMSSD (ms) at 1 Hz over a `window_s` trailing window.
 
-    Returns array of length n_seconds; NaN where fewer than 2 beats in the window.
+    Returns array of length n_seconds; NaN where the window holds no pair of
+    successive valid intervals.
     Index i corresponds to the interval [i, i+1) seconds from recording start.
     """
     results = np.full(n_seconds, np.nan)
@@ -55,9 +61,9 @@ def rmssd_series(
         t_start = t_end - window_s
         left = bisect.bisect_left(ts, t_start)
         right = bisect.bisect_right(ts, t_end)
-        rr_win = rr_ms[left:right]
-        if len(rr_win) >= 2:
-            diffs = np.diff(rr_win)
+        diffs = np.diff(rr_ms[left:right])
+        diffs = diffs[~np.isnan(diffs)]
+        if len(diffs) >= 1:
             results[i] = float(np.sqrt(np.mean(diffs ** 2)))
 
     return results
@@ -77,6 +83,7 @@ def hr_series(
         left = bisect.bisect_left(ts, t_end - 1.0)
         right = bisect.bisect_right(ts, t_end)
         rr_win = rr_ms[left:right]
+        rr_win = rr_win[~np.isnan(rr_win)]
         if len(rr_win) >= 1:
             results[i] = float(np.mean(60000.0 / rr_win))
 

@@ -16,7 +16,7 @@ iOS / on-device deployment is a deferred Phase 3, out of scope for this plan.
 - Compute: M1 MacBook Air, **CPU only**.
 - Primary model: `autogluon/chronos-2-small` (28M params); compare against full `amazon/chronos-2` (120M) only as a ceiling reference if compute allows.
 - Target series: **rolling RMSSD** at 1 Hz, computed over a 60 s sliding window of artifact-corrected RR intervals.
-- Covariates (Phase 1): HR (1 Hz mean), ACC magnitude, EDA, RESP rate, TEMP — all downsampled to 1 Hz, all past-only.
+- Covariates (Phase 1): HR (1 Hz mean), ACC magnitude, EDA, RESP rate, TEMP — all downsampled to 1 Hz. Covariate models get them as history **and** as concurrent (known-future) values for the scored window; the primary comparison is univariate (see `results/phase1_results.md`).
 - Covariates (Phase 2): Vector Magnitude / Steps / HR from Actigraph, Inclinometer state, **categorical activity code** from Activity.csv expanded to 1 Hz (covers exercise + eating + caffeine + alcohol + screen use), binary `is_sleeping` from sleep.csv.
 - Baselines: **SMA** (sanity floor, univariate), **ARIMAX** (with covariates, headline classical baseline). LSTM forecaster deferred.
 - Evaluation: leave-one-subject-out; AUROC/AUPRC of anomaly score vs. labels; paired Wilcoxon signed-rank for method comparisons; report effect sizes.

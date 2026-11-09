@@ -4,8 +4,8 @@ import numpy as np
 import pandas as pd
 from scipy.signal import butter, filtfilt, find_peaks
 
-SR = 700
-VALID_LABELS = frozenset({1, 2, 3, 4})
+from thesis.io.wesad import SAMPLING_RATE as SR
+from thesis.io.wesad import VALID_LABELS
 
 
 def _pool_mean(arr_1d: np.ndarray, n_seconds: int) -> np.ndarray:
@@ -34,18 +34,17 @@ def _resp_rate_1hz(resp_700hz: np.ndarray, n_seconds: int) -> np.ndarray:
     resp_low = resp_700hz[: n_blocks * factor].reshape(n_blocks, factor).mean(axis=1)
 
     nyq = target_sr / 2.0
-    b, a = butter(4, [0.1 / nyq, 0.49], btype="band")
+    b, a = butter(4, [0.1 / nyq, 0.5 / nyq], btype="band")
     resp_filt = filtfilt(b, a, resp_low)
 
     # Detect inhalation peaks (min 2 s apart = max 30 breaths/min)
     peaks, _ = find_peaks(resp_filt, distance=target_sr * 2)
+    peak_times = peaks / float(target_sr)
 
     rate_1hz = np.full(n_seconds, np.nan)
     for i in range(n_seconds):
         t_end = float(i + 1)
-        t_start = t_end - 60.0
-        peak_times = peaks / float(target_sr)
-        in_window = peak_times[(peak_times >= t_start) & (peak_times <= t_end)]
+        in_window = peak_times[(peak_times >= t_end - 60.0) & (peak_times <= t_end)]
         if len(in_window) >= 2:
             rate_1hz[i] = 60.0 / np.mean(np.diff(in_window))
 
@@ -54,8 +53,6 @@ def _resp_rate_1hz(resp_700hz: np.ndarray, n_seconds: int) -> np.ndarray:
 
 def build(
     signals: dict[str, np.ndarray],
-    rr_ms: np.ndarray,
-    peak_times_s: np.ndarray,
     rmssd_1hz: np.ndarray,
     hr_1hz: np.ndarray,
 ) -> pd.DataFrame:
@@ -63,18 +60,15 @@ def build(
 
     Columns: rmssd, hr_bpm, acc_mag, eda, resp_rate, temp, label.
     """
-    from thesis.hrv.rmssd import hr_series
-
     n_seconds = len(signals["label"]) // SR
 
     acc_mag = np.linalg.norm(signals["acc"][: n_seconds * SR], axis=1)
-    acc_mag_1hz = _pool_mean(acc_mag, n_seconds)
 
     return pd.DataFrame(
         {
             "rmssd":     rmssd_1hz[:n_seconds],
             "hr_bpm":    hr_1hz[:n_seconds],
-            "acc_mag":   acc_mag_1hz,
+            "acc_mag":   _pool_mean(acc_mag, n_seconds),
             "eda":       _pool_mean(signals["eda"], n_seconds),
             "resp_rate": _resp_rate_1hz(signals["resp"], n_seconds),
             "temp":      _pool_mean(signals["temp"], n_seconds),

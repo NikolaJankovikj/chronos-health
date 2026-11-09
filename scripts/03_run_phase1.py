@@ -1,119 +1,161 @@
-"""T1.9–T1.13 — Phase-1 LOSO evaluation on WESAD.
+"""T1.9–T1.13 — Phase-1 evaluation on WESAD (protocol: thesis.eval.harness).
 
-Runs four scorers and prints a comparison table:
-  1. SMA            — univariate, no fit, context-blind floor baseline
-  2. ARIMAX         — SARIMAX(2,0,2) with covariates per window (information advantage: knows future covariates)
-  3. Chronos-2 (no covariates) — foundation model, univariate, zero-shot ablation
-  4. Chronos-2 (covariates)    — foundation model, context-aware, zero-shot (past-only covariates)
+Primary comparison (univariate, identical input — the context RMSSD only):
+  SMA, ARIMA(2,0,2), Chronos-2-small zero-shot.
+Secondary (covariate effect): ARIMAX and Chronos-2 given all five covariates,
+as history and as concurrent (known-future) values, plus a diagnostic of how
+far those covariates move outside the range the context shows.
 
 Run with:
     uv run python scripts/03_run_phase1.py
 """
+
 from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from thesis.eval.harness import COVARIATE_COLS, compare_methods, loso_evaluate
-from thesis.models import arimax, chronos2, sma
+from thesis.eval import harness as h
+from thesis.models import chronos2
 
 PROCESSED_DIR = Path("data/wesad_processed")
-RESULTS_PATH  = Path("data/phase1_results.csv")
+OUT_DIR = Path("results")
+
+PRIMARY = [("Chronos2", "SMA"), ("Chronos2", "ARIMA")]
+SECONDARY = [("Chronos2_cov", "Chronos2"), ("ARIMAX_cov", "ARIMA")]
+TARGET_AUROC = 0.70  # PLAN.md §5.5 criterion 1
 
 
-def load_subjects(processed_dir: Path) -> dict[str, pd.DataFrame]:
-    dfs = {}
-    for path in sorted(processed_dir.glob("S*.parquet")):
-        dfs[path.stem] = pd.read_parquet(path)
-    print(f"Loaded {len(dfs)} subjects from {processed_dir}")
-    return dfs
+def load_subjects() -> dict[str, pd.DataFrame]:
+    paths = sorted(PROCESSED_DIR.glob("S*.parquet"), key=lambda p: int(p.stem[1:]))
+    return {p.stem: pd.read_parquet(p) for p in paths}
 
 
-def run_scorer(name: str, scorer, subject_dfs: dict) -> pd.DataFrame:
-    print(f"\n  [{name}]")
-    results = loso_evaluate(subject_dfs, scorer)
-    med_auroc = results["auroc"].dropna().median()
-    med_auprc = results["auprc"].dropna().median()
-    valid = results["auroc"].notna().sum()
-    print(f"    median AUROC={med_auroc:.3f}  AUPRC={med_auprc:.3f}  ({valid}/{len(results)} subjects valid)")
-    return results
+def summarize(results: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    rows = {}
+    for name, res in results.items():
+        a = res["auroc"].astype(float)
+        rows[name] = {
+            "n_subjects": int(a.notna().sum()),
+            "auroc_median": a.median(),
+            "auroc_q25": a.quantile(0.25),
+            "auroc_q75": a.quantile(0.75),
+            "auprc_median": res["auprc"].astype(float).median(),
+            "auroc_vs_nonstress_median": res["auroc_vs_nonstress"]
+            .astype(float)
+            .median(),
+        }
+    return pd.DataFrame(rows).T
+
+
+def compare_family(
+    auroc: pd.DataFrame, pairs: list[tuple[str, str]], family: str
+) -> pd.DataFrame:
+    """Paired comparisons with Holm correction inside the family."""
+    rows = [
+        {"family": family, "a": a, "b": b, **h.compare_methods(auroc[a], auroc[b])}
+        for a, b in pairs
+    ]
+    df = pd.DataFrame(rows)
+    df["p_holm"] = h.holm(df["p_value"].tolist())
+    df["verdict"] = [h.verdict(r, r["p_holm"]) for r in df.to_dict("records")]
+    return df
+
+
+def covariate_ood(subject_dfs: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Per covariate: share of stress-period values outside the context's [min, max],
+    and the stress-period mean shift in context-std units (median over subjects)."""
+    rows = []
+    for sid, df in subject_dfs.items():
+        df = h._ffill(df)
+        ctx, _ = h.split_baseline(df)
+        stress = df.loc[df["label"] == h.STRESS]
+        for col in h.COVARIATE_COLS:
+            outside = (stress[col] < ctx[col].min()) | (stress[col] > ctx[col].max())
+            shift = abs(stress[col].mean() - ctx[col].mean()) / ctx[col].std()
+            rows.append({
+                "subject": sid,
+                "covariate": col,
+                "frac_outside": outside.mean(),
+                "shift_sd": shift,
+            })
+    return (
+        pd.DataFrame(rows).groupby("covariate")[["frac_outside", "shift_sd"]].median()
+    )
+
+
+def print_criteria(
+    summary: pd.DataFrame, primary: pd.DataFrame, secondary: pd.DataFrame
+) -> None:
+    """PLAN.md §5.5, judged on Holm-adjusted tests (superiority needs p_holm < α)."""
+    med = summary.loc["Chronos2", "auroc_median"]
+    print("\n=== Phase-1 success criteria ===")
+    print(
+        f"  1. Chronos2 median AUROC > {TARGET_AUROC}: {'PASS' if med > TARGET_AUROC else 'FAIL'} ({med:.3f})"
+    )
+    for i, row in enumerate(
+        [*primary.to_dict("records"), secondary.to_dict("records")[0]], start=2
+    ):
+        ok = row["verdict"].startswith("A better")
+        print(
+            f"  {i}. {row['a']} better than {row['b']}: {'PASS' if ok else 'FAIL'} ({row['verdict']})"
+        )
+
+
+def _with_flat_rmssd(scorer: h.Scorer) -> h.Scorer:
+    def flat(context_df: pd.DataFrame, observed_df: pd.DataFrame) -> float:
+        return scorer(context_df, observed_df.assign(rmssd=context_df["rmssd"].mean()))
+
+    return flat
+
+
+def hrv_dependence(subject_dfs: dict[str, pd.DataFrame], scorers: dict[str, h.Scorer]) -> pd.DataFrame:
+    """Median AUROC of each covariate model when the observed RMSSD is replaced by the
+    context mean.  Staying high means the detector separates stress from the covariates
+    alone, i.e. it is not detecting an HRV anomaly."""
+    rows = {}
+    for name in ("ARIMAX_cov", "Chronos2_cov"):
+        flat = h.evaluate_subjects(subject_dfs, _with_flat_rmssd(scorers[name]))
+        rows[name] = {"auroc_flat_rmssd_median": flat["auroc"].astype(float).median()}
+    return pd.DataFrame(rows).T
+
+
+def save_tables(tables: dict[str, pd.DataFrame]) -> None:
+    for name, table in tables.items():
+        table.to_csv(OUT_DIR / f"phase1_{name}.csv", index=name in ("summary", "covariate_ood", "hrv_dependence"))
+    print(f"\nTables saved → {OUT_DIR}/phase1_*.csv")
+
+
+def print_tables(tables: dict[str, pd.DataFrame]) -> None:
+    with pd.option_context("display.width", 200, "display.max_columns", 20,
+                           "display.float_format", "{:.3f}".format):
+        for name in ("auroc", "summary", "comparisons", "covariate_ood", "hrv_dependence"):
+            print(f"\n=== {name} ===\n{tables[name]}")
 
 
 def main() -> None:
-    subject_dfs = load_subjects(PROCESSED_DIR)
+    subject_dfs = load_subjects()
+    print(f"Loaded {len(subject_dfs)} subjects")
+    scorers = h.phase1_scorers(chronos2.load_pipeline())
+    results = {name: h.evaluate_subjects(subject_dfs, s) for name, s in tqdm(scorers.items(), desc="scorers")}
 
-    print("\n=== Loading Chronos-2-small pipeline ===")
-    pipeline = chronos2.load_pipeline()
-    print("  Pipeline ready.")
-
-    print("\n=== Running LOSO evaluation ===")
-
-    scorers = {
-        "SMA":             sma.make_scorer(stats_window=60),
-        "ARIMAX":          arimax.make_scorer(covariate_cols=COVARIATE_COLS),
-        "Chronos2_noCV":   chronos2.make_scorer(pipeline, covariate_cols=[]),
-        "Chronos2_CV":     chronos2.make_scorer(pipeline, covariate_cols=COVARIATE_COLS),
+    auroc = pd.DataFrame({k: v["auroc"].astype(float) for k, v in results.items()})
+    summary = summarize(results)
+    primary = compare_family(auroc, PRIMARY, "primary")
+    secondary = compare_family(auroc, SECONDARY, "secondary")
+    tables = {
+        "auroc": auroc,
+        "summary": summary,
+        "comparisons": pd.concat([primary, secondary], ignore_index=True),
+        "covariate_ood": covariate_ood(subject_dfs),
+        "hrv_dependence": hrv_dependence(subject_dfs, scorers),
     }
-
-    all_results: dict[str, pd.DataFrame] = {}
-    for name, scorer in tqdm(scorers.items(), desc="scorers"):
-        all_results[name] = run_scorer(name, scorer, subject_dfs)
-
-    # ── Results table ────────────────────────────────────────────────────────
-    print("\n=== Per-subject AUROC ===")
-    auroc_df = pd.DataFrame({k: v["auroc"] for k, v in all_results.items()})
-    print(auroc_df.round(3).to_string())
-
-    print("\n=== Summary (median ± IQR across subjects) ===")
-    for name, res in all_results.items():
-        a = res["auroc"].dropna()
-        p = res["auprc"].dropna()
-        print(f"  {name:<20s}  AUROC {a.median():.3f} [{a.quantile(.25):.3f}–{a.quantile(.75):.3f}]"
-              f"  AUPRC {p.median():.3f}")
-
-    # ── Statistical comparisons ───────────────────────────────────────────────
-    print("\n=== Pairwise comparisons (Wilcoxon signed-rank + Cliff's δ) ===")
-    pairs = [
-        ("Chronos2_CV",   "SMA",           "Chronos2(CV) vs SMA"),
-        ("Chronos2_CV",   "ARIMAX",         "Chronos2(CV) vs ARIMAX"),
-        ("Chronos2_CV",   "Chronos2_noCV",  "Chronos2(CV) vs Chronos2(noCV)  [covariate ablation]"),
-        ("Chronos2_noCV", "SMA",            "Chronos2(noCV) vs SMA"),
-    ]
-    for a, b, label in pairs:
-        cmp = compare_methods(all_results[a]["auroc"], all_results[b]["auroc"],
-                              method_a=a, method_b=b)
-        direction = ">" if cmp["median_a"] > cmp["median_b"] else "<"
-        sig = "✓" if (not np.isnan(cmp["p_value"]) and cmp["p_value"] < 0.05) else " "
-        print(f"  {sig} {label}")
-        print(f"      {a}={cmp['median_a']:.3f}  {direction}  {b}={cmp['median_b']:.3f}"
-              f"  p={cmp['p_value']:.3f}  δ={cmp['cliffs_delta']:.2f}  n={cmp['n']}")
-
-    # ── Save ─────────────────────────────────────────────────────────────────
-    rows = []
-    for name, res in all_results.items():
-        for sid, row in res.iterrows():
-            rows.append({"subject": sid, "method": name, **row.to_dict()})
-    out = pd.DataFrame(rows)
-    RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    out.to_csv(RESULTS_PATH, index=False)
-    print(f"\nResults saved → {RESULTS_PATH}")
-
-    # ── Phase-1 success criteria ─────────────────────────────────────────────
-    cv_auroc = all_results["Chronos2_CV"]["auroc"].dropna().median()
-    print("\n=== Phase-1 success criteria ===")
-    print(f"  1. Chronos2_CV AUROC > 0.70:  {'PASS' if cv_auroc > 0.70 else 'FAIL'}  ({cv_auroc:.3f})")
-    cmp_sma   = compare_methods(all_results["Chronos2_CV"]["auroc"], all_results["SMA"]["auroc"])
-    cmp_arx   = compare_methods(all_results["Chronos2_CV"]["auroc"], all_results["ARIMAX"]["auroc"])
-    cmp_abl   = compare_methods(all_results["Chronos2_CV"]["auroc"], all_results["Chronos2_noCV"]["auroc"])
-    cv_gt_sma = all_results["Chronos2_CV"]["auroc"].dropna().median() > all_results["SMA"]["auroc"].dropna().median()
-    cv_gt_arx = all_results["Chronos2_CV"]["auroc"].dropna().median() > all_results["ARIMAX"]["auroc"].dropna().median()
-    cv_gt_abl = all_results["Chronos2_CV"]["auroc"].dropna().median() > all_results["Chronos2_noCV"]["auroc"].dropna().median()
-    print(f"  2. Chronos2_CV > SMA (median): {'PASS' if cv_gt_sma else 'FAIL'}")
-    print(f"  3. Chronos2_CV > ARIMAX (median): {'PASS' if cv_gt_arx else 'FAIL'}")
-    print(f"  4. Covariates help (CV > noCV): {'PASS' if cv_gt_abl else 'FAIL'}")
+    print_tables(tables)
+    print_criteria(summary, primary, secondary)
+    tables["per_subject"] = pd.concat(results, names=["method", "subject"]).reset_index()
+    save_tables({k: v for k, v in tables.items() if k != "auroc"})
 
 
 if __name__ == "__main__":

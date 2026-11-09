@@ -3,8 +3,8 @@
 Run with:
     uv run python scripts/01_preprocess_wesad.py
 
-Verification (T1.7): prints mean RMSSD per condition for each subject.
-Expected: baseline RMSSD > stress RMSSD for the majority of subjects.
+Verification: prints % of RR intervals rejected as artifacts (T1.6, expect <5%)
+and mean RMSSD per condition (T1.7, expect baseline > stress for most subjects).
 """
 from __future__ import annotations
 
@@ -21,9 +21,10 @@ from thesis.io.wesad import SUBJECT_IDS, load_subject
 WESAD_ROOT = Path("WESAD")
 OUT_DIR = Path("data/wesad_processed")
 WINDOW_S = 60
+MAX_ARTIFACT_FRAC = 0.05
 
 
-def process_subject(subject_id: int) -> pd.DataFrame:
+def process_subject(subject_id: int) -> tuple[pd.DataFrame, float]:
     signals = load_subject(WESAD_ROOT, subject_id)
     n_seconds = len(signals["label"]) // 700
 
@@ -31,12 +32,12 @@ def process_subject(subject_id: int) -> pd.DataFrame:
     rmssd_1hz = rmssd_series(rr_ms, peak_times_s, n_seconds, window_s=WINDOW_S)
     hr_1hz = hr_series(rr_ms, peak_times_s, n_seconds)
 
-    df = build_covariates(signals, rr_ms, peak_times_s, rmssd_1hz, hr_1hz)
+    df = build_covariates(signals, rmssd_1hz, hr_1hz)
     df.index.name = "second"
-    return df
+    return df, float(np.isnan(rr_ms).mean())
 
 
-def verify(df: pd.DataFrame, subject_id: int) -> None:
+def verify(df: pd.DataFrame, subject_id: int, artifact_frac: float) -> None:
     label_names = {1: "baseline", 2: "stress", 3: "amusement", 4: "meditation"}
     parts = []
     for lbl, name in label_names.items():
@@ -45,7 +46,8 @@ def verify(df: pd.DataFrame, subject_id: int) -> None:
     base = df.loc[df["label"] == 1, "rmssd"].dropna().mean()
     stress = df.loc[df["label"] == 2, "rmssd"].dropna().mean()
     ok = "✓" if (not np.isnan(base) and not np.isnan(stress) and base > stress) else "✗"
-    print(f"  S{subject_id}: {ok}  " + "  ".join(parts))
+    flag = "  ← artifacts >5%" if artifact_frac > MAX_ARTIFACT_FRAC else ""
+    print(f"  S{subject_id}: {ok}  artifacts={artifact_frac:.1%}  " + "  ".join(parts) + flag)
 
 
 def main() -> None:
@@ -54,9 +56,9 @@ def main() -> None:
 
     passed = 0
     for sid in tqdm(SUBJECT_IDS, desc="subjects"):
-        df = process_subject(sid)
+        df, artifact_frac = process_subject(sid)
         df.to_parquet(OUT_DIR / f"S{sid}.parquet")
-        verify(df, sid)
+        verify(df, sid, artifact_frac)
 
         base = df.loc[df["label"] == 1, "rmssd"].dropna().mean()
         stress = df.loc[df["label"] == 2, "rmssd"].dropna().mean()
