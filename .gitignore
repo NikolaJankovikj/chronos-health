@@ -14,3 +14,10 @@ DataPaper
 data/
 .ipynb_checkpoints/
 *.ipynb_checkpoints
+# LaTeX build output
+report/*.aux
+report/*.bbl
+report/*.blg
+report/*.log
+report/*.out
+.DS_Store
